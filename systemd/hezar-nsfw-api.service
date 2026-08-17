@@ -1,0 +1,28 @@
+[Unit]
+Description=Hezar NSFW/NSFL local classification API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/nsfw-api
+EnvironmentFile=/root/nsfw-api/.env
+ExecStart=/root/nsfw-api/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 --workers 1
+Restart=always
+RestartSec=3
+
+# Modest resource ceilings so a runaway request can't starve the bot.
+# Adjust MemoryMax if you observe legitimate need for more headroom.
+MemoryMax=1500M
+CPUQuota=250%
+
+# Hardening (safe defaults for a localhost-only service run as root)
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/root/nsfw-api /tmp/hezar_nsfw
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hezar-nsfw-api
+
+[Install]
+WantedBy=multi-user.target
