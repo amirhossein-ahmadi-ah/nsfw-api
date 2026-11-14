@@ -83,12 +83,18 @@ def validate_file(path: Path) -> Tuple[str, int]:
         )
 
     size_bytes = os.path.getsize(path)
-    max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
-    if size_bytes > max_bytes:
-        raise PathSecurityError(
-            "FILE_TOO_LARGE",
-            f"File size {size_bytes} bytes exceeds limit of {max_bytes} bytes.",
-        )
+    if ext in settings.IMAGE_EXTENSIONS:
+        max_mb = settings.MAX_IMAGE_SIZE_MB
+    else:
+        max_mb = settings.MAX_VIDEO_SIZE_MB or settings.MAX_FILE_SIZE_MB
+
+    if max_mb > 0:
+        max_bytes = max_mb * 1024 * 1024
+        if size_bytes > max_bytes:
+            raise PathSecurityError(
+                "FILE_TOO_LARGE",
+                f"File size {size_bytes} bytes exceeds limit of {max_bytes} bytes ({max_mb} MB).",
+            )
 
     if size_bytes == 0:
         raise PathSecurityError("EMPTY_FILE", "File is empty.")

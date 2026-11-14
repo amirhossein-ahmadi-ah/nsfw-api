@@ -64,9 +64,8 @@ def _run_probe(path: Path) -> dict:
     cmd = [
         ffprobe_binary(),
         "-v", "error",
+        "-show_entries", "format=duration:stream=duration",
         "-print_format", "json",
-        "-show_streams",
-        "-show_format",
         os.fspath(path),
     ]
     try:
@@ -111,11 +110,13 @@ def _duration_seconds(metadata: dict) -> float:
 
 
 def probe_duration(path: Path) -> float:
-    """Return duration without decoding media frames."""
-    duration = _duration_seconds(_run_probe(path))
-    if duration <= 0:
-        raise MediaProbeError("Could not determine media duration.")
-    return duration
+    """Return duration without decoding media frames. Returns 0.0 if not determinable."""
+    try:
+        duration = _duration_seconds(_run_probe(path))
+        return max(0.0, duration)
+    except Exception as exc:
+        logger.warning("Could not probe duration for %s: %s", path.name, exc)
+        return 0.0
 
 
 def sample_count(duration: float) -> int:
@@ -145,35 +146,35 @@ def even_sample_timestamps(duration: float, count: int) -> list[float]:
 def _decode_one_frame(path: Path, timestamp: float) -> np.ndarray | None:
     """Seek to timestamp and decode exactly one 224x224 RGB frame."""
     expected = settings.MODEL_INPUT_SIZE * settings.MODEL_INPUT_SIZE * 3
+    cmd = [
+        ffmpeg_binary(),
+        "-y",
+        "-noautorotate",
+        "-ss", f"{max(0.0, timestamp):.3f}",
+        "-i", os.fspath(path),
+        "-an", "-sn", "-dn",
+        "-threads", "2",
+        "-vframes", "1",
+        "-vf", f"scale={settings.MODEL_INPUT_SIZE}:{settings.MODEL_INPUT_SIZE}:flags=bilinear",
+        "-f", "rawvideo",
+        "-pix_fmt", "rgb24",
+        "pipe:1",
+    ]
     try:
-        stream = ffmpeg.input(os.fspath(path), ss=max(0.0, timestamp))
-        stream = ffmpeg.output(
-            stream,
-            "pipe:1",
-            vframes=1,
-            vf=f"scale={settings.MODEL_INPUT_SIZE}:{settings.MODEL_INPUT_SIZE}:flags=bilinear",
-            format="rawvideo",
-            pix_fmt="rgb24",
-        )
-        process = ffmpeg.run_async(
-            stream,
-            cmd=ffmpeg_binary(),
-            pipe_stdout=True,
-            pipe_stderr=True,
-            quiet=True,
-            overwrite_output=True,
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         try:
             stdout, stderr = process.communicate(timeout=settings.FFMPEG_FRAME_TIMEOUT)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
-            raise
-    except (ffmpeg.Error, subprocess.TimeoutExpired, OSError) as exc:
-        detail = ""
-        if isinstance(exc, ffmpeg.Error) and getattr(exc, "stderr", None):
-            detail = exc.stderr.decode("utf-8", "replace").strip()[-240:]
-        logger.debug("FFmpeg frame seek failed at %.3fs: %s", timestamp, detail or exc)
+            logger.debug("FFmpeg seek timed out at %.3fs in %s", timestamp, path.name)
+            return None
+    except Exception as exc:
+        logger.debug("FFmpeg frame seek failed at %.3fs: %s", timestamp, exc)
         return None
 
     if len(stdout) < expected:
@@ -196,16 +197,35 @@ def iter_video_frames(path: Path, max_frames: int | None = None) -> Iterator[np.
     """
     duration = probe_duration(path)
     limit = max_frames or settings.MAX_MEDIA_FRAMES
-    count = min(sample_count(duration), limit)
-    timestamps = even_sample_timestamps(duration, count)
-    logger.info(
-        "Media %s: duration=%.1fs, sampling=%d/%d configured frames",
-        path.name, duration, len(timestamps), limit,
-    )
-    for ts in timestamps:
-        frame = _decode_one_frame(path, ts)
-        if frame is not None:
-            yield frame
+    if duration > 0:
+        count = min(sample_count(duration), limit)
+        timestamps = even_sample_timestamps(duration, count)
+        logger.info(
+            "Media %s: duration=%.1fs, sampling=%d/%d configured frames",
+            path.name, duration, len(timestamps), limit,
+        )
+        for ts in timestamps:
+            frame = _decode_one_frame(path, ts)
+            if frame is not None:
+                yield frame
+    else:
+        logger.info(
+            "Media %s: duration unknown, using incremental sampling up to %d frames",
+            path.name, limit,
+        )
+        ts = 0.0
+        step = max(2.0, settings.SAMPLE_INTERVAL_SECONDS)
+        yielded = 0
+        consecutive_misses = 0
+        while yielded < limit and consecutive_misses < 3:
+            frame = _decode_one_frame(path, ts)
+            if frame is not None:
+                yield frame
+                yielded += 1
+                consecutive_misses = 0
+            else:
+                consecutive_misses += 1
+            ts += step
 
 
 def iter_gif_frames(path: Path, max_frames: int | None = None) -> Iterator[np.ndarray]:

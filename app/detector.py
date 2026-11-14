@@ -219,19 +219,49 @@ class Detector:
         scores: List[FrameScore] = []
         batch: List[np.ndarray] = []
         batch_size = max(1, settings.INFERENCE_BATCH_SIZE)
+        consecutive_suspicious = 0
+        min_consecutive = settings.MIN_CONSECUTIVE_FRAMES
+        threshold = min(settings.NSFW_THRESHOLD, settings.NSFL_THRESHOLD)
+        override = settings.SINGLE_FRAME_OVERRIDE
+
         for frame in frames:
             batch.append(frame)
             if len(batch) >= batch_size:
                 try:
-                    scores.extend(self._run_batch(batch))
+                    new_scores = self._run_batch(batch)
+                    scores.extend(new_scores)
+                    for s in new_scores:
+                        if s.nsfw >= threshold or s.nsfl >= threshold:
+                            consecutive_suspicious += 1
+                        else:
+                            consecutive_suspicious = 0
+
+                        # Smart early exit 1: unambiguous single-frame extreme score
+                        if s.nsfw >= override or s.nsfl >= override:
+                            logger.info(
+                                "Early exit: extreme single-frame score (nsfw=%.3f, nsfl=%.3f) after %d frames",
+                                s.nsfw, s.nsfl, len(scores),
+                            )
+                            return scores
+
+                        # Smart early exit 2: sustained consecutive suspicious run
+                        if consecutive_suspicious >= min_consecutive:
+                            logger.info(
+                                "Early exit: %d consecutive suspicious frames after %d frames",
+                                consecutive_suspicious, len(scores),
+                            )
+                            return scores
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Batch inference failed, skipping batch: %s", exc)
                 batch.clear()
+
         if batch:
             try:
-                scores.extend(self._run_batch(batch))
+                new_scores = self._run_batch(batch)
+                scores.extend(new_scores)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Batch inference failed, skipping final batch: %s", exc)
+
         return scores
 
     async def score_frames(self, frames: List[np.ndarray]) -> List[FrameScore]:

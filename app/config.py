@@ -13,9 +13,20 @@ from typing import List
 
 from dotenv import load_dotenv
 
+import tempfile
+
 # Load .env from the project root (one directory above /app).
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
+
+
+def _resolve_project_path(env_val: str | None, default: Path) -> Path:
+    if not env_val:
+        return default
+    p = Path(env_val).expanduser()
+    if not p.is_absolute():
+        p = _PROJECT_ROOT / p
+    return p.resolve()
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -57,10 +68,10 @@ class Settings:
 
     # --- Paths -------------------------------------------------------
     PROJECT_ROOT: Path = _PROJECT_ROOT
-    MODEL_PATH: Path = Path(
-        os.getenv("MODEL_PATH", str(_PROJECT_ROOT / "models" / "image-safety-classifier-l.onnx"))
+    MODEL_PATH: Path = _resolve_project_path(
+        os.getenv("MODEL_PATH"), _PROJECT_ROOT / "models" / "image-safety-classifier-l.onnx"
     )
-    LOG_DIR: Path = Path(os.getenv("LOG_DIR", str(_PROJECT_ROOT / "logs")))
+    LOG_DIR: Path = _resolve_project_path(os.getenv("LOG_DIR"), _PROJECT_ROOT / "logs")
 
     # FFmpeg is a system dependency. Leave blank to use PATH; optionally
     # point these at custom executables on Windows/Linux.
@@ -110,18 +121,20 @@ class Settings:
     SINGLE_FRAME_OVERRIDE: float = _get_float("SINGLE_FRAME_OVERRIDE", 0.98)
 
     # --- Sampling / limits ----------------------------------------------
-    MAX_MEDIA_FRAMES: int = _get_int("MAX_MEDIA_FRAMES", 48)
+    MAX_MEDIA_FRAMES: int = _get_int("MAX_MEDIA_FRAMES", 24)
     MIN_MEDIA_FRAMES: int = _get_int("MIN_MEDIA_FRAMES", 8)
     SAMPLE_INTERVAL_SECONDS: float = _get_float("SAMPLE_INTERVAL_SECONDS", 10.0)
-    FFPROBE_TIMEOUT: float = _get_float("FFPROBE_TIMEOUT", 10.0)
-    FFMPEG_FRAME_TIMEOUT: float = _get_float("FFMPEG_FRAME_TIMEOUT", 8.0)
-    MAX_FILE_SIZE_MB: int = _get_int("MAX_FILE_SIZE_MB", 100)
+    FFPROBE_TIMEOUT: float = _get_float("FFPROBE_TIMEOUT", 20.0)
+    FFMPEG_FRAME_TIMEOUT: float = _get_float("FFMPEG_FRAME_TIMEOUT", 12.0)
+    MAX_FILE_SIZE_MB: int = _get_int("MAX_FILE_SIZE_MB", 4096)
+    MAX_VIDEO_SIZE_MB: int = _get_int("MAX_VIDEO_SIZE_MB", 4096)
+    MAX_IMAGE_SIZE_MB: int = _get_int("MAX_IMAGE_SIZE_MB", 50)
 
     # --- Concurrency / timeouts ------------------------------------------
     MAX_CONCURRENT_INFERENCE: int = _get_int("MAX_CONCURRENT_INFERENCE", 1)
     INFERENCE_BATCH_SIZE: int = _get_int("INFERENCE_BATCH_SIZE", 4)
     QUEUE_WAIT_TIMEOUT: float = _get_float("QUEUE_WAIT_TIMEOUT", 30.0)
-    DETECTION_TIMEOUT: float = _get_float("DETECTION_TIMEOUT", 60.0)
+    DETECTION_TIMEOUT: float = _get_float("DETECTION_TIMEOUT", 120.0)
 
     # --- Logging ----------------------------------------------------------
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
@@ -141,6 +154,7 @@ class Settings:
     @property
     def RESOLVED_ALLOWED_DIRS(self) -> list[Path]:
         resolved = []
+        # Configured dirs
         for raw in self.ALLOWED_DIRS:
             p = Path(raw).expanduser()
             if not p.is_absolute():
@@ -149,6 +163,18 @@ class Settings:
                 resolved.append(p.resolve())
             except (OSError, RuntimeError):
                 continue
+
+        # Standard temp dirs used by local bot/media integrations
+        system_temp = Path(tempfile.gettempdir()).resolve()
+        if system_temp not in resolved:
+            resolved.append(system_temp)
+        tmp_dir = Path("/tmp").resolve()
+        if tmp_dir.exists() and tmp_dir not in resolved:
+            resolved.append(tmp_dir)
+        project_root = self.PROJECT_ROOT.resolve()
+        if project_root not in resolved:
+            resolved.append(project_root)
+
         return resolved
 
     @property
